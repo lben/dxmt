@@ -3376,6 +3376,11 @@ static int madeira_fg_present(id<MTLCommandBuffer> cb, id<CAMetalDrawable> drawa
   return r;
 }
 
+/* Madeira's screen layouts (app/Madeira/IOSDisplayShim.m): the last step on a game frame,
+ * encoded into its command buffer before the drawable is presented. Weak, so a host
+ * without it links and presents exactly as before. */
+extern void madeira_present_remap(id<MTLCommandBuffer> cmdbuf, id<CAMetalDrawable> drawable) __attribute__((weak));
+
 static NTSTATUS
 _MTLCommandBuffer_presentDrawable(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
@@ -3387,6 +3392,8 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
     return STATUS_SUCCESS;
   }
   int mode = g_madeira_vsync_mode;
+  if (madeira_present_remap)
+    madeira_present_remap((id<MTLCommandBuffer>)params->handle, (id<CAMetalDrawable>)params->arg);
   /* ml1050: this call IS the frame boundary on the encode thread. */
   if (madeira_frame_hooks_on())
     ios_frame_encode_present(0);
