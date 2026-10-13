@@ -1064,6 +1064,12 @@ handle_signature_gs(
     }
     case microsoft::D3D10_SB_OPERAND_TYPE_INPUT_PRIMITIVEID:
       break;
+    /* iOS-Madeira: `dcl_input vGSInstanceID` (a geometry shader with
+     * dcl_gsinstances). Reads of it and the instance count are already
+     * lowered (dxbc_instructions.cpp, dxbc_converter_gs.cpp); only the
+     * declaration was refused. Frostpunk's shaders declare it. */
+    case microsoft::D3D11_SB_OPERAND_TYPE_INPUT_GS_INSTANCE_ID:
+      break;
     default:
       assert(0 && "unhandled geometry shader input");
       break;
