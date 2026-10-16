@@ -10,6 +10,8 @@
 #include "config/config.hpp"   /* ml675: d3d11.mipClampBC */
 #include "d3d11_mip_clamp_policy.hpp"   /* ml2000: d3d11.mipClampAuto */
 #include "dxmt_mem_census.hpp"   /* Madeira M7 [tex-new] */
+#include "d3d11_downscale.hpp"   /* Madeira M7: d3d11.downscaleMip1 */
+#include <memory>
 #include "util_env.hpp"
 #include "util_madeira_switch.hpp"
 #include "winemetal.h"
@@ -558,6 +560,8 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
    * descriptor; only `info` and the upload loop see reduced numbers. */
   uint32_t mip_bias = 0;
   typename tag::DESC1 physDesc = finalDesc;
+  std::unique_ptr<uint8_t[]> downscaled;   /* Madeira M7: half-size copy of the initial data */
+  D3D11_SUBRESOURCE_DATA downscaled_data = {};
   if constexpr (std::is_same_v<typename tag::DESC1, D3D11_TEXTURE2D_DESC1>) {
     static int cached_clamp = -1;
     if (cached_clamp < 0)
@@ -605,6 +609,45 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       info.height             = physDesc.Height;
       info.mipmap_level_count = physDesc.MipLevels;
     }
+    /* Madeira M7: d3d11.downscaleMip1=N stores a single-level, SRV-only texture whose larger
+     * side is >= N at half width and height (see d3d11_downscale.hpp). Only formats whose
+     * texels can be averaged as bytes in every view the D3D format allows: UNORM RGBA8/BGRA8
+     * (no TYPELESS, which may be viewed as UINT/SNORM) and BC3 with 8-aligned sides, so the
+     * half-size BC3 is whole blocks. It needs the initial data: textures filled later are
+     * left alone, and later writes to a downscaled one are dropped (see CopyTexture and
+     * UpdateTexture). */
+    static int downscale_min = -1;
+    if (downscale_min < 0)
+      downscale_min = std::max(0, Config::getInstance().getOption<int>("d3d11.downscaleMip1", 0));
+    const DXGI_FORMAT ds_fmt = finalDesc.Format;
+    const bool ds_rgba8 = ds_fmt == DXGI_FORMAT_R8G8B8A8_UNORM || ds_fmt == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+                          ds_fmt == DXGI_FORMAT_B8G8R8A8_UNORM || ds_fmt == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB ||
+                          ds_fmt == DXGI_FORMAT_B8G8R8X8_UNORM || ds_fmt == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+    const bool ds_bc3 = (ds_fmt == DXGI_FORMAT_BC3_UNORM || ds_fmt == DXGI_FORMAT_BC3_UNORM_SRGB) &&
+                        finalDesc.Width % 8 == 0 && finalDesc.Height % 8 == 0;
+    if (downscale_min && pInitialData && pInitialData[0].pSysMem && !mip_bias && (ds_rgba8 || ds_bc3) &&
+        finalDesc.MipLevels == 1 && finalDesc.ArraySize == 1 && finalDesc.SampleDesc.Count == 1 &&
+        (finalDesc.Usage == D3D11_USAGE_DEFAULT || finalDesc.Usage == D3D11_USAGE_IMMUTABLE) &&
+        finalDesc.BindFlags == D3D11_BIND_SHADER_RESOURCE && !finalDesc.CPUAccessFlags && !finalDesc.MiscFlags &&
+        std::max(finalDesc.Width, finalDesc.Height) >= (uint32_t)downscale_min) {
+      const uint32_t hw = ds_rgba8 ? (finalDesc.Width + 1) / 2 : finalDesc.Width / 2;
+      const uint32_t hh = ds_rgba8 ? (finalDesc.Height + 1) / 2 : finalDesc.Height / 2;
+      const size_t pitch = ds_rgba8 ? (size_t)hw * 4 : (size_t)(hw / 4) * 16;
+      const size_t bytes = ds_rgba8 ? pitch * hh : pitch * (hh / 4);
+      downscaled.reset(new (std::nothrow) uint8_t[bytes]);
+      if (downscaled) {
+        const auto *src = (const uint8_t *)pInitialData[0].pSysMem;
+        if (ds_rgba8)
+          DownscaleRGBA8Half(src, pInitialData[0].SysMemPitch, finalDesc.Width, finalDesc.Height, downscaled.get());
+        else
+          DownscaleBC3Half(src, pInitialData[0].SysMemPitch, finalDesc.Width, finalDesc.Height, downscaled.get());
+        downscaled_data.pSysMem = downscaled.get();
+        downscaled_data.SysMemPitch = (UINT)pitch;
+        downscaled_data.SysMemSlicePitch = (UINT)bytes;
+        physDesc.Width = info.width = hw;
+        physDesc.Height = info.height = hh;
+      }
+    }
   }
   /* Madeira M7 diagnostic: one line per created texture (every BC one, others >= 1 MB) with its
    * PHYSICAL size, so a log shows which textures the clamp left at full size and why. */
@@ -626,7 +669,7 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
           info.mipmap_level_count, " arr=", info.array_length, " type=", (uint32_t)info.type, " s=",
           info.sample_count, " usage=", (uint32_t)finalDesc.Usage, " bind=", finalDesc.BindFlags, " cpu=",
           finalDesc.CPUAccessFlags, " misc=", finalDesc.MiscFlags, " bias=", mip_bias, " init=",
-          pInitialData ? 1 : 0, " KB=", bytes >> 10);
+          pInitialData ? 1 : 0, " half=", downscaled ? 1 : 0, " KB=", bytes >> 10);
   }
   bool single_subresource = info.mipmap_level_count == 1 && info.array_length == 1 &&
                             !(physDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE);
@@ -634,6 +677,10 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
   /* ml745: the immediate context resolves streamed uploads through the dxmt
    * Texture, not the D3D wrapper, so the bias must be visible there too. */
   texture->setMipBias(mip_bias);
+  if (downscaled) {
+    texture->setDownscaled();
+    pInitialData = &downscaled_data;   /* the one physical subresource, already half size */
+  }
 
   auto &initializer = pDevice->GetDXMTDevice().queue().initializer;
 

@@ -626,6 +626,8 @@ inline std::atomic<uint32_t> g_cp_stg_stg{0};
 inline std::atomic<uint32_t> g_cp_bc_stg_unsupported{0};
 inline std::atomic<uint32_t> g_cp_bc_stg_decoded{0};   /* ml747 */
 inline std::atomic<uint32_t> g_cp_bc_stg_fail{0};      /* ml747 */
+/* Madeira M7: copies/uploads/resolves dropped because they touch a d3d11.downscaleMip1 texture */
+inline std::atomic<uint32_t> g_ds_dropped{0};
 
 inline void BCStreamReport() {
   static std::atomic<uint32_t> tick{0};
@@ -647,7 +649,8 @@ inline void BCStreamReport() {
       " stg<-tex=", g_cp_tex_stg.load(), " stg<-stg=", g_cp_stg_stg.load(),
       " BCstg-unsup=", g_cp_bc_stg_unsupported.load(),
       " | ml747 BCstg decoded=", g_cp_bc_stg_decoded.load(),
-      " fail=", g_cp_bc_stg_fail.load());
+      " fail=", g_cp_bc_stg_fail.load(),
+      " | m7 downscaled-dropped=", g_ds_dropped.load());
 }
 
 /* ml1252: 2x2 box filter of a decoded (physical-format) image */
@@ -1207,6 +1210,10 @@ public:
     MTL_DXGI_FORMAT_DESC format_desc;
     if (FAILED(MTLQueryDXGIFormat(device->GetMTLDevice(), Format, format_desc))) {
       ERR("ResolveSubresource: invalid format ", Format);
+      return;
+    }
+    if (auto d_ = GetTexture(pDstResource); d_ && d_->downscaled()) {   /* Madeira M7 */
+      g_ds_dropped.fetch_add(1, std::memory_order_relaxed);
       return;
     }
     InvalidateCurrentPass();
@@ -3763,6 +3770,13 @@ public:
   CopyTexture(TextureCopyCommand &&cmd) {
     if (cmd.Invalid)
       return;
+    {
+      auto s_ = GetTexture(cmd.pSrc), d_ = GetTexture(cmd.pDst);
+      if ((s_ && s_->downscaled()) || (d_ && d_->downscaled())) {   /* Madeira M7 */
+        g_ds_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
+    }
 
     /* ml746: TRANSLATE MIP INDICES THROUGH EACH TEXTURE'S OWN CLAMP.
      *
@@ -4290,6 +4304,10 @@ public:
       DrainRefills();   /* ml1256 */
 
     if (auto dst = GetTexture(cmd.pDst)) {
+      if (dst->downscaled()) {   /* Madeira M7 */
+        g_ds_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
       /* ml745: TRANSLATE THE MIP INDEX THROUGH THE CLAMP.
        *
        * When a BC texture is clamped, the D3D-visible descriptor keeps its full
@@ -4484,6 +4502,10 @@ public:
     std::lock_guard<mutex_t> lock(mutex);
 
     if (auto dst = GetTexture(cmd.pDst)) {
+      if (dst->downscaled()) {   /* Madeira M7 */
+        g_ds_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
       /* ml745: TRANSLATE THE MIP INDEX THROUGH THE CLAMP.
        *
        * When a BC texture is clamped, the D3D-visible descriptor keeps its full

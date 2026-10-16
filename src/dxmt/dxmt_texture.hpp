@@ -187,6 +187,10 @@ public:
    * correct. */
   uint32_t mipBias() const { return mip_bias_; }
   void setMipBias(uint32_t bias) { mip_bias_ = bias; }
+  /* Madeira M7 (d3d11.downscaleMip1): the single physical level is half the logical
+   * size, so a texel-addressed copy or upload into or out of it cannot be honoured. */
+  bool downscaled() const { return downscaled_; }
+  void setDownscaled() { downscaled_ = true; }
   /* ml1252: PHYSICAL levels a mipClampBC copy could not fill (its source level
    * was clamped away). Bit n = level n, any slice. Sampling skips a lost level
    * at the top (see TextureMetadata's caller) and UpdateTexture refills it from
@@ -321,6 +325,7 @@ private:
   std::vector<TextureViewDescriptor> viewDescriptors_;
   dxmt::shared_mutex mutex_;
   WMT::Device device_;
+  bool downscaled_ = false;        /* Madeira M7, last so earlier member offsets stay as shipped */
 };
 
 class RenamableTexturePool {
