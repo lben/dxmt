@@ -9,6 +9,7 @@
 #include "util_win32_compat.h"
 #include "config/config.hpp"   /* ml675: d3d11.mipClampBC */
 #include "d3d11_mip_clamp_policy.hpp"   /* ml2000: d3d11.mipClampAuto */
+#include "dxmt_mem_census.hpp"   /* Madeira M7 [tex-new] */
 #include "util_env.hpp"
 #include "util_madeira_switch.hpp"
 #include "winemetal.h"
@@ -604,6 +605,28 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       info.height             = physDesc.Height;
       info.mipmap_level_count = physDesc.MipLevels;
     }
+  }
+  /* Madeira M7 diagnostic: one line per created texture (every BC one, others >= 1 MB) with its
+   * PHYSICAL size, so a log shows which textures the clamp left at full size and why. */
+  {
+    static std::atomic<uint32_t> tex_n{0};
+    const uint32_t f = (uint32_t)finalDesc.Format;
+    const bool bc = IsBCFormatForClamp(f);
+    const uint64_t block = ((f >= 70 && f <= 72) || (f >= 79 && f <= 81)) ? 8 : 16;
+    uint64_t bytes = 0;
+    for (uint32_t m = 0; m < std::max(1u, info.mipmap_level_count); m++) {
+      const uint64_t w = std::max(1u, info.width >> m), h = std::max(1u, info.height >> m),
+                     d = std::max(1u, info.depth >> m);
+      bytes += bc ? ((w + 3) / 4) * ((h + 3) / 4) * block * d : w * h * d * mem_census_texel_bytes(info.pixel_format);
+    }
+    bytes *= (uint64_t)std::max(1u, info.array_length) * std::max(1u, info.sample_count) *
+             ((info.type == WMTTextureTypeCube || info.type == WMTTextureTypeCubeArray) ? 6 : 1);
+    if ((bc || bytes >= (1u << 20)) && tex_n.fetch_add(1) < 4000)
+      ERR("[tex-new] fmt=", f, " ", info.width, "x", info.height, "x", info.depth, " mips=",
+          info.mipmap_level_count, " arr=", info.array_length, " type=", (uint32_t)info.type, " s=",
+          info.sample_count, " usage=", (uint32_t)finalDesc.Usage, " bind=", finalDesc.BindFlags, " cpu=",
+          finalDesc.CPUAccessFlags, " misc=", finalDesc.MiscFlags, " bias=", mip_bias, " init=",
+          pInitialData ? 1 : 0, " KB=", bytes >> 10);
   }
   bool single_subresource = info.mipmap_level_count == 1 && info.array_length == 1 &&
                             !(physDesc.MiscFlags & D3D11_RESOURCE_MISC_TEXTURECUBE);
