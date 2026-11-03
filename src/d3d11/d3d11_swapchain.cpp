@@ -1,3 +1,4 @@
+#include "d3d11_ui_probe.hpp"   /* Madeira UI probe */
 #include "d3d11_swapchain.hpp"
 #include "com/com_guid.hpp"
 #include "config/config.hpp"
@@ -735,6 +736,12 @@ public:
            const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
     if (SyncInterval > 4)
       return DXGI_ERROR_INVALID_CALL;
+
+    if (ui_probe::enabled() && !(PresentFlags & DXGI_PRESENT_TEST)) {   /* Madeira UI probe */
+      Com<ID3D11DeviceContext> context;
+      device_->GetImmediateContext(&context);
+      ui_probe::present(device_, context.ptr(), backbuffer_.ptr());
+    }
 
     /* iOS-Madeira 2026-07-03: [PRESENT_GAP] — attribute the exactly-20-FPS
      * ceiling. Splits each frame into time spent INSIDE Present1 (our

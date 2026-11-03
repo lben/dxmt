@@ -6,6 +6,8 @@ and should be not used as a compilation unit
 since it is for internal use only
 (and I don't want to deal with several thousands line of code)
 */
+#include "d3d11_ui_probe.hpp"   /* Madeira UI probe */
+#include <format>
 #include "Metal.hpp"
 #include "config/config.hpp"   /* ml869 */
 #include <deque>   /* ml1256 */
@@ -4880,6 +4882,49 @@ public:
     return ptr ? ptr->GetManagedShader() : nullptr;
   };
 
+  /* Madeira UI probe (d3d11_ui_probe.hpp): this draw's targets, states, shaders and the
+   * textures its pixel shader reads. */
+  void
+  UiProbeRecord() {
+    auto &om = state_.OutputMerger;
+    Com<ID3D11Resource> rt, ds;
+    if (om.NumRTVs && om.RTVs[0])
+      om.RTVs[0]->GetResource(&rt);
+    if (om.DSV)
+      om.DSV->GetResource(&ds);
+    D3D11_DEPTH_STENCIL_DESC depth = {};
+    if (om.DepthStencilState)
+      om.DepthStencilState->GetDesc(&depth);
+    else
+      depth.DepthEnable = TRUE, depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;   // D3D11's default
+    D3D11_BLEND_DESC blend = {};
+    if (om.BlendState)
+      om.BlendState->GetDesc(&blend);
+    auto sha = [](ManagedShader s) { return s ? s->sha1().string().substr(0, 8) : std::string("-"); };
+    auto &vp = state_.Rasterizer.viewports[0];
+    std::string state = std::format(
+        "rt={} n={} dsv={} depth={}/{} blend={}({},{}) vs={} ps={} topo={} vp={},{} {}x{} |", ui_probe::describe(rt.ptr()),
+        om.NumRTVs, ui_probe::describe(ds.ptr()), (int)depth.DepthEnable,
+        depth.DepthWriteMask == D3D11_DEPTH_WRITE_MASK_ALL ? 1 : 0, (int)blend.RenderTarget[0].BlendEnable,
+        (int)blend.RenderTarget[0].SrcBlend, (int)blend.RenderTarget[0].DestBlend,
+        sha(GetManagedShader<PipelineStage::Vertex>()), sha(GetManagedShader<PipelineStage::Pixel>()),
+        (int)state_.InputAssembler.Topology, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height
+    );
+    Com<ID3D11Resource> held[16];
+    ID3D11Resource *srvs[16] = {};
+    unsigned count = 0;
+    auto &bound = state_.ShaderStages[PipelineStage::Pixel].SRVs;
+    for (unsigned slot = 0; slot < 16; slot++) {
+      if (!bound.test_bound(slot) || !bound[slot].SRV)
+        continue;
+      bound[slot].SRV->GetResource(&held[count]);
+      srvs[count] = held[count].ptr();
+      state += std::format(" {}:{}", slot, ui_probe::describe(srvs[count]));
+      count++;
+    }
+    ui_probe::record(state, rt.ptr(), srvs, count);
+  }
+
   template <bool IndexedDraw>
   void
   InitializeGraphicsPipelineDesc(MTL_GRAPHICS_PIPELINE_DESC &Desc) {
@@ -5130,6 +5175,8 @@ public:
     }
     /* ml1254: draw census */
     g_perf.draws.fetch_add(1, std::memory_order_relaxed);
+    if (ui_probe::active())   /* Madeira UI probe */
+      UiProbeRecord();
     if (status == DrawCallStatus::Tessellation)
       g_perf.draws_tess.fetch_add(1, std::memory_order_relaxed);
     else if (status == DrawCallStatus::Geometry)
